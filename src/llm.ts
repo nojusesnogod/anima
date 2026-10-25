@@ -10,9 +10,10 @@ export type LlmClient = (prompt: string) => Promise<string>;
 // 裸调 "claude" 会 "Executable not found in $PATH"，每个 LLM 阶段挂、夜夜降级
 // （2026-06-15 实锤，原误诊为"撞额度墙"）。故必须解析绝对路径，不依赖 PATH。
 const CLAUDE_BIN_CANDIDATES = [
-  "/opt/homebrew/bin/claude",
-  "/usr/local/bin/claude",
-  `${process.env.HOME ?? ""}/.claude/local/claude`,
+  "/opt/homebrew/bin/claude", // macOS Homebrew
+  "/usr/local/bin/claude", // macOS/Linux 常见系统级
+  `${process.env.HOME ?? ""}/.claude/local/claude`, // Claude Code 官方本地安装（跨平台）
+  `${process.env.HOME ?? ""}/.local/bin/claude`, // Linux 用户级 bin（npm/手装常见）
 ];
 
 export function resolveClaudeBin(

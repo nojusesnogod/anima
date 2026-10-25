@@ -22,7 +22,9 @@ import {
   generateSelfReview,
   storeSelfReviewResult,
 } from "./selfReview";
-import { readTranscriptEntries, atOrAfter, dayBoundUuid } from "./transcript";
+import { atOrAfter, dayBoundUuid } from "./transcript";
+import type { Adapter } from "./adapter";
+import { getActiveAdapter } from "./adapters/registry";
 import { localDate, SQL_LOCAL_OCCURRED_DATE } from "./tz";
 import { advanceWatermarkOnly, readWatermark } from "./watermark";
 // ⚠️ 铁规（实时向量化）：只 import **type**——EmbedFn 运行期擦除、不拉 vectorize→embed→transformers。
@@ -79,9 +81,17 @@ export type ReviewOutcome =
 export async function processReviewItem(
   db: Database,
   item: WorkItem,
-  opts: { llm: LlmClient; clock?: Clock; maxAttempts?: number; shouldAbort?: () => boolean },
+  opts: {
+    llm: LlmClient;
+    clock?: Clock;
+    maxAttempts?: number;
+    shouldAbort?: () => boolean;
+    /** 平台转接头（P0）；缺省 getActiveAdapter()，行为逐字不变。 */
+    adapter?: Adapter;
+  },
 ): Promise<ReviewOutcome> {
   const clock = opts.clock ?? systemClock;
+  const adapter = opts.adapter ?? getActiveAdapter();
   const sid = item.sessionId;
 
   if (!item.transcriptPath) {
@@ -89,7 +99,7 @@ export async function processReviewItem(
     return "transcript_missing";
   }
   // **单读一次**：水位线定位 / 采集 / 增量切片共用同一份快照，消除多次读 live transcript 的视图漂移。
-  const entries = readTranscriptEntries(item.transcriptPath);
+  const entries = adapter.parseTranscript(item.transcriptPath);
   if (entries.length === 0) {
     markReviewDone(db, sid, item.targetUuid);
     return "transcript_missing";
@@ -148,7 +158,7 @@ export async function processReviewItem(
   }
 
   // 采集该增量段的客观事件进 situation_log（同一快照），供 buildIncrementalMaterial 的 events/兜底壳用。
-  captureTranscript(db, item.transcriptPath, { clock, entries });
+  captureTranscript(db, item.transcriptPath, { clock, entries, adapter });
 
   const inc = buildIncrementalMaterial(db, {
     transcriptPath: item.transcriptPath,
@@ -156,6 +166,7 @@ export async function processReviewItem(
     sinceUuid: wmOld,
     targetUuid: sliceTarget,
     entries,
+    adapter,
   });
   if (!inc.ok) {
     // target 不可见（live transcript 还没把 target 那条落到本进程文件视图）→ 留待下轮，绝不烧 LLM/推水位线。
@@ -429,8 +440,9 @@ export function enqueueReviewForStop(
   transcriptPath: string,
   sessionId?: string | null,
   clock: Clock = systemClock,
+  adapter: Adapter = getActiveAdapter(),
 ): void {
-  const entries = readTranscriptEntries(transcriptPath);
+  const entries = adapter.parseTranscript(transcriptPath);
   const tail = entries.at(-1)?.uuid ?? null;
   if (tail === null) return; // 空 transcript，无可复盘尾巴
   const sid = sessionId ?? entries[0]?.sessionId ?? null;

@@ -7,6 +7,7 @@ import { stripEcho } from "./echo";
 import { classifyUserTurn } from "./authorship";
 import { appendSituation, type SituationInput } from "./situation";
 import { normalizeProject } from "./project";
+import type { Adapter } from "./adapter";
 import {
   entriesAfter,
   flattenResultContent,
@@ -420,6 +421,9 @@ export interface CaptureOptions {
   /** 预读好的 transcript 条目。传入则不再读文件——调用方（makeup）要让采集与增量切片基于**同一份
    *  快照**，消除两次读 live transcript 之间追加导致"事件没采进 situation_log、切片却已含该回合"的窗口。 */
   entries?: TranscriptEntry[];
+  /** 平台转接头（P0）：读 transcript + 提取事件走它。缺省=本地 CC 函数（readTranscriptEntries/
+   *  extractEvents），行为逐字不变；显式传入别的 Adapter 即切平台。 */
+  adapter?: Adapter;
 }
 
 /**
@@ -451,7 +455,9 @@ export function captureTranscript(
   opts: CaptureOptions = {},
 ): { captured: number; cursor: string | null } {
   const clock = opts.clock ?? systemClock;
-  const entries = opts.entries ?? readTranscriptEntries(transcriptPath);
+  const adapter = opts.adapter;
+  const entries =
+    opts.entries ?? (adapter ? adapter.parseTranscript(transcriptPath) : readTranscriptEntries(transcriptPath));
   const dbCursor = getCursor(db, transcriptPath);
   // 单调守卫（仅作用于**显式传入的快照**）：dbCursor 非空却不在本快照里 = 快照比游标还旧/与之不一致，
   // 此时 entriesAfter 会退化成"整段重采"→ situation_log 无唯一约束 → 重复事件 + 游标回退（codex IMPORTANT）。
@@ -463,7 +469,8 @@ export function captureTranscript(
   if (fresh.length === 0) return { captured: 0, cursor: dbCursor };
 
   // 采集 → 先剔已采过的（v7 幂等，治重采抬高 cap 现存计数）→ work-memory cap/去重过滤（纯读 DB，写事务前）
-  const events = filterWorkMemoryEvents(db, filterAlreadyCaptured(db, extractEvents(fresh)));
+  const extracted = adapter ? adapter.extractEvents(fresh) : extractEvents(fresh);
+  const events = filterWorkMemoryEvents(db, filterAlreadyCaptured(db, extracted));
   const lastUuid = fresh[fresh.length - 1]!.uuid;
   const now = clock.now().toISOString();
   opts.afterRead?.(); // 测试缝：在此注入并发对手抢采（生产恒 undefined）

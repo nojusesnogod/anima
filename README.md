@@ -105,6 +105,7 @@ Storage is a single local SQLite file (append-only; memories are never physicall
 
 - **Not fully local.** Capture, search, and vectors are local. But the nightly digestion/diary/personality calls `claude -p` (Haiku) — that's Anthropic's cloud, the same trust boundary you're already in by using Claude Code, and it uses your existing subscription. No third party is added. If "nothing ever leaves this machine" is your requirement, anima does not meet it.
 - **macOS only (v1).** The night shift runs on launchd. A systemd/cron port is a welcome contribution.
+- **Claude Code only, for now.** Reading sessions now goes through a small platform adapter, and an experimental Codex CLI adapter is included (`ANIMA_ADAPTER=codex`, tested against real Codex session files). The installer only wires up Claude Code; using anima with Codex is manual and unsupported.
 - **Retrieval has a ceiling.** The default embedding model is `bge-base-zh-v1.5` (Chinese-first; English works but is not its home turf). Ask the same question with very different words and recall lands around coin-flip. Exact terms and time-line queries are reliable.
 - **Single machine.** One SQLite file, no sync. Moving machines = copying `~/.claude/anima/`.
 - **Digestion can fail on a bad night.** By design it fails *loudly into placeholders* and self-heals later, rather than silently inventing memories. Still: it happens.

@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { systemClock, type Clock } from "./clock";
 import { stripEcho } from "./echo";
 import { isSyntheticUserTurn } from "./authorship";
+import { isSyntheticTurn, type Adapter } from "./adapter";
 import { insertExperience } from "./experiences";
 import { findNearDuplicate } from "./dedup";
 import { listSituations, appendSituation, type SituationRow } from "./situation";
@@ -53,7 +54,13 @@ function assembleMaterial(
   entries: TranscriptEntry[],
   situations: SituationRow[],
   bookmarkRows: BookmarkRow[],
+  adapter?: Adapter,
 ): Material {
+  // 平台转接头（P0）：合成轮识别 + 回声剥离走它。缺省=本地 CC 函数（isSyntheticUserTurn/stripEcho），
+  // 与显式传入 claudeCodeAdapter 逐字等价（isSyntheticTurn(cc,e)===isSyntheticUserTurn(e)、cc.stripEcho===stripEcho）。
+  const isSynthetic = (e: TranscriptEntry): boolean =>
+    adapter ? isSyntheticTurn(adapter, e) : isSyntheticUserTurn(e);
+  const strip = adapter ? adapter.stripEcho : stripEcho;
   let project: string | null = null;
   const conversation: string[] = [];
   // U30-③（2026-07-02 批）：对话正文过 scrubSecrets 再进 Material——这是第二条脱敏腿。
@@ -69,16 +76,16 @@ function assembleMaterial(
     // D2（隔离不销毁）后写侧启发式命中改落 user_message_suspect 隔离行，但素材侧**照旧整条跳过**
     // （isSyntheticUserTurn=铁证∪嫌疑并集）：material 是派生的、宁缺勿污——库里全文还在，翻案可复活，
     // 素材随时可重建；situation 腿同理被下方 EVENT_ACTIVITY_KINDS 白名单挡（suspect 不在其中）。
-    if (isSyntheticUserTurn(e)) continue;
+    if (isSynthetic(e)) continue;
     project ??= normalizeProject(e.cwd);
     if (typeof e.content === "string") {
-      const text = scrubSecrets(stripEcho(e.content)).trim();
+      const text = scrubSecrets(strip(e.content)).trim();
       if (text && e.type === "user") conversation.push(`用户：${text}`);
       continue;
     }
     for (const block of e.content) {
       if (block.type === "text" && typeof block.text === "string") {
-        const text = scrubSecrets(stripEcho(block.text)).trim();
+        const text = scrubSecrets(strip(block.text)).trim();
         if (!text) continue;
         conversation.push(e.type === "user" ? `用户：${text}` : `我：${text.slice(0, 400)}`);
       }
@@ -145,12 +152,14 @@ function queryBookmarks(
 /** 全量素材（实时收工 / 夜间补课整段复盘）：行为与拆分前一致。 */
 export function buildMaterial(
   db: Database,
-  opts: { transcriptPath: string; sessionId: string },
+  opts: { transcriptPath: string; sessionId: string; adapter?: Adapter },
 ): Material {
-  const entries = readTranscriptEntries(opts.transcriptPath);
+  const entries = opts.adapter
+    ? opts.adapter.parseTranscript(opts.transcriptPath)
+    : readTranscriptEntries(opts.transcriptPath);
   const situations = listSituations(db, { sessionId: opts.sessionId });
   const bookmarkRows = queryBookmarks(db, opts.sessionId);
-  return assembleMaterial(opts.sessionId, entries, situations, bookmarkRows);
+  return assembleMaterial(opts.sessionId, entries, situations, bookmarkRows, opts.adapter);
 }
 
 export type IncrementalMaterial =
@@ -197,9 +206,13 @@ export function buildIncrementalMaterial(
      * 前向写（makeup/worker）**不传**：无上界 = 取全库最新 prior = 现行行为，零回归。
      */
     slicePos?: number | null;
+    /** 平台转接头（P0）：读 transcript + 合成轮/回声走它；缺省=本地 CC 函数，逐字等价。 */
+    adapter?: Adapter;
   },
 ): IncrementalMaterial {
-  const entries = opts.entries ?? readTranscriptEntries(opts.transcriptPath);
+  const entries =
+    opts.entries ??
+    (opts.adapter ? opts.adapter.parseTranscript(opts.transcriptPath) : readTranscriptEntries(opts.transcriptPath));
   const slice = entriesBetween(entries, opts.sinceUuid ?? null, opts.targetUuid);
   if (!slice.ok) return { ok: false, reason: slice.reason };
 
@@ -225,7 +238,7 @@ export function buildIncrementalMaterial(
     untilOccurredAt: untilTs ?? undefined,
   });
   const bookmarkRows = queryBookmarks(db, opts.sessionId, sinceTs ?? undefined, untilTs ?? undefined);
-  const material = assembleMaterial(opts.sessionId, slice.entries, situations, bookmarkRows);
+  const material = assembleMaterial(opts.sessionId, slice.entries, situations, bookmarkRows, opts.adapter);
   // 跨天切片承接（§3.5）：有前片（sinceUuid!=null）才查上一片的**真叙事**自评（kind='self_review'，
   // 排除 fallback 兜底壳/空 content），取最近一条注入 priorSliceSummary；首评/无 review → 不注、prompt 逐字不变。
   if (opts.sinceUuid != null) {

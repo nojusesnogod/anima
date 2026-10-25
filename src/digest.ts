@@ -25,7 +25,9 @@ import {
 } from "./selfHeal";
 import { appendSituation } from "./situation";
 import { scrubMoodViolations } from "./sovereignty";
-import { readTranscriptEntries, dayBoundUuid, atOrAfter, type TranscriptEntry } from "./transcript";
+import { dayBoundUuid, atOrAfter, type TranscriptEntry } from "./transcript";
+import type { Adapter } from "./adapter";
+import { getActiveAdapter } from "./adapters/registry";
 import { advanceWatermarkOnly, readWatermark } from "./watermark";
 import { extractJson, extractMarkdownDoc, findUngroundedPaths } from "./validator";
 import { backfillVectors, pruneOrphanVectors, type EmbedFn } from "./vectorize";
@@ -77,6 +79,8 @@ interface Ctx {
   config: DigestConfig;
   findTranscripts: () => TranscriptRef[];
   embed?: EmbedFn;
+  /** 平台转接头（P0）：所有读 transcript / 提取事件 / 装素材经它，核心不认平台。 */
+  adapter: Adapter;
 }
 
 export interface DigestOptions {
@@ -88,6 +92,8 @@ export interface DigestOptions {
   findTranscripts?: () => TranscriptRef[];
   /** 语义指纹补算用的 embedding 函数；不传则 vectorize 阶段安全空跑（保单测离线、不碰 ONNX） */
   embed?: EmbedFn;
+  /** 平台转接头（P0）；缺省 getActiveAdapter()（ANIMA_ADAPTER 未设＝claude-code），行为逐字不变。 */
+  adapter?: Adapter;
   /** 仅测试用：替换单个阶段实现（注入故障等） */
   stageOverrides?: Partial<Record<StageName, (ctx: Ctx) => Promise<void>>>;
 }
@@ -251,13 +257,16 @@ export function requeueLateReclaim(db: Database, opts: { now?: Date } = {}): str
 }
 
 /** 默认 transcript 发现：从采集游标里反查（曾被采集过的 transcript 都在册） */
-export function defaultFindTranscripts(db: Database): TranscriptRef[] {
+export function defaultFindTranscripts(
+  db: Database,
+  adapter: Adapter = getActiveAdapter(),
+): TranscriptRef[] {
   const rows = db.query("SELECT transcript_path FROM capture_cursors").all() as {
     transcript_path: string;
   }[];
   const refs: TranscriptRef[] = [];
   for (const r of rows) {
-    const sessionId = readTranscriptEntries(r.transcript_path)[0]?.sessionId;
+    const sessionId = adapter.parseTranscript(r.transcript_path)[0]?.sessionId;
     if (sessionId) refs.push({ sessionId, path: r.transcript_path });
   }
   return refs;
@@ -336,8 +345,8 @@ async function stageMakeup(ctx: Ctx): Promise<void> {
     // **整段单读一次**：采集 / tailUuid / 水位线定位 / 增量切片全基于这同一份快照，消除多次读 live
     // transcript 的视图漂移——尤其防 captureTranscript 与切片之间追加导致"事件没采进 situation_log、
     // 切片却已含该回合 → 误判 inert 推过水位线"（codex IMPORTANT）。
-    const entries = readTranscriptEntries(ref.path);
-    captureTranscript(ctx.db, ref.path, { clock: ctx.clock, entries }); // 兜底捕齐（同一快照）
+    const entries = ctx.adapter.parseTranscript(ref.path);
+    captureTranscript(ctx.db, ref.path, { clock: ctx.clock, entries, adapter: ctx.adapter }); // 兜底捕齐（同一快照）
     const tailUuid = entries.at(-1)?.uuid ?? null;
     if (tailUuid === null) continue; // 空 transcript
     const wmOld = readWatermark(ctx.db, sessionId);
@@ -378,6 +387,7 @@ async function stageMakeup(ctx: Ctx): Promise<void> {
       sinceUuid: wmOld,
       targetUuid: tailUuid,
       entries,
+      adapter: ctx.adapter,
     });
     if (!inc.ok) {
       incomplete = true; // 快照不可见（不该发生：targetUuid 取自同一 entries）；保险留待重试
@@ -451,8 +461,8 @@ async function stageMakeupDaysplit(ctx: Ctx): Promise<void> {
   const transcripts = ctx.findTranscripts();
   const entriesBySession = new Map<string, TranscriptEntry[]>();
   for (const ref of transcripts) {
-    const entries = readTranscriptEntries(ref.path);
-    captureTranscript(ctx.db, ref.path, { clock: ctx.clock, entries });
+    const entries = ctx.adapter.parseTranscript(ref.path);
+    captureTranscript(ctx.db, ref.path, { clock: ctx.clock, entries, adapter: ctx.adapter });
     entriesBySession.set(ref.sessionId, entries);
   }
 
@@ -495,7 +505,7 @@ async function stageMakeupDaysplit(ctx: Ctx): Promise<void> {
       continue;
     }
     // 整段单读一次（不变量⑥）：复用入口缓存的同一份快照（采集已在入口完成；日界定位 / 增量切片 / 覆盖校验同源）。
-    const entries = entriesBySession.get(sessionId) ?? readTranscriptEntries(ref.path);
+    const entries = entriesBySession.get(sessionId) ?? ctx.adapter.parseTranscript(ref.path);
     if (entries.length === 0) continue; // 空 transcript
 
     // 本夜上界＝东八日界（半开 `< ${night}T16:00Z`）。本夜有真实活动 → 通常必有早于日界的条目。
@@ -580,6 +590,7 @@ async function stageMakeupDaysplit(ctx: Ctx): Promise<void> {
       sinceUuid: wmOld,
       targetUuid: dayBound,
       entries,
+      adapter: ctx.adapter,
     });
     if (!inc.ok) {
       incomplete = true; // 不该发生：dayBound 取自同一 entries、必可见；保险留待重试
@@ -1094,7 +1105,7 @@ async function stageHeal(ctx: Ctx): Promise<void> {
       continue;
     }
 
-    const entries = readTranscriptEntries(ref.path);
+    const entries = ctx.adapter.parseTranscript(ref.path);
 
     // target 不在快照（采集滞后/末段未落）→ **不计 attempts**、推冷却下夜重试（同 worker 无惩罚退回）。
     if (!entries.some((e) => e.uuid === acc.target_uuid)) {
@@ -1121,6 +1132,7 @@ async function stageHeal(ctx: Ctx): Promise<void> {
       targetUuid: acc.target_uuid,
       entries,
       slicePos: acc.shell_id, // §3.5：上界=壳id，取「壳原位之前」那片当 prior（愈合片自己的承接也对）
+      adapter: ctx.adapter,
     });
     if (!inc.ok) {
       // 切片不可见（target 已确认在快照、不该发生）→ 保守不计 attempts、下夜重试。
@@ -1191,11 +1203,14 @@ export async function healAllNow(
     clock?: Clock;
     concurrency?: number;
     onProgress?: (msg: string) => void;
+    /** 平台转接头（P0）；缺省 getActiveAdapter()，行为逐字不变。 */
+    adapter?: Adapter;
   },
 ): Promise<{ total: number; healed: number; failed: number; noTranscript: number; inert: number }> {
   const clock = opts.clock ?? systemClock;
+  const adapter = opts.adapter ?? getActiveAdapter();
   const K = Math.max(1, opts.concurrency ?? 3);
-  const transcripts = (opts.findTranscripts ?? (() => defaultFindTranscripts(db)))();
+  const transcripts = (opts.findTranscripts ?? (() => defaultFindTranscripts(db, adapter)))();
   const txIndex = new Map(transcripts.map((t) => [t.sessionId, t.path]));
   const shells = db
     .query(
@@ -1222,10 +1237,10 @@ export async function healAllNow(
     for (const sh of batch) {
       const path = txIndex.get(sh.sid);
       if (!path) { noTranscript++; continue; }
-      const entries = readTranscriptEntries(path);
+      const entries = adapter.parseTranscript(path);
       const night = centroidNight(entries);
       if (!night) { noTranscript++; continue; }
-      const material = buildMaterial(db, { transcriptPath: path, sessionId: sh.sid });
+      const material = buildMaterial(db, { transcriptPath: path, sessionId: sh.sid, adapter });
       if (material.conversation.length === 0 && material.events.length === 0 && material.bookmarks.length === 0) {
         invalidateExperience(db, sh.id, clock);
         inert++;
@@ -1288,14 +1303,16 @@ export async function runNightlyDigestion(
 ): Promise<DigestResult> {
   const clock = opts.clock ?? systemClock;
   const night = opts.night ?? nightOf(clock.now());
+  const adapter = opts.adapter ?? getActiveAdapter();
   const ctx: Ctx = {
     db,
     night,
     clock,
     llm: opts.llm,
     config: opts.config,
-    findTranscripts: opts.findTranscripts ?? (() => defaultFindTranscripts(db)),
+    findTranscripts: opts.findTranscripts ?? (() => defaultFindTranscripts(db, adapter)),
     embed: opts.embed,
+    adapter,
   };
 
   const stages = {} as Record<StageName, StageResult>;
