@@ -10,6 +10,9 @@
 
 English · [中文](README.zh-CN.md)
 
+> [!WARNING]
+> **No longer maintained (October 2026).** The code stays here as-is; issues and pull requests won't be answered. The experimental Codex adapter has known bugs (it can merge records from different sessions and record failed commands as successful) — don't use it.
+
 **Memory, moods, and a growable personality for Claude Code. Your AI keeps a diary — and you can read it.**
 
 anima (Latin: *soul*) is a local-first plugin that gives Claude Code continuity: it remembers what you two did yesterday, it has moods that cool off overnight, its personality grows out of real shared history, and every night it writes a diary entry that it knows you might read.
