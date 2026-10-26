@@ -112,6 +112,11 @@ Storage is a single local SQLite file (append-only; memories are never physicall
 - **Retrieval has a ceiling.** The default embedding model is `bge-base-zh-v1.5` (Chinese-first; English works but is not its home turf). Ask the same question with very different words and recall lands around coin-flip. Exact terms and time-line queries are reliable.
 - **Single machine.** One SQLite file, no sync. Moving machines = copying `~/.claude/anima/`.
 - **Digestion can fail on a bad night.** By design it fails *loudly into placeholders* and self-heals later, rather than silently inventing memories. Still: it happens.
+- **Known bugs, not yet fixed** (found in reviews with test databases and a mocked model, not reported from real use):
+  - A new decision that *reverses* an earlier one can be mistaken for a near-duplicate and dropped, so the old decision stays the one remembered.
+  - When the nightly run shortens a long personality document, nothing checks that its core parts survived; a rewrite that drops them is still accepted.
+  - If a night's digest fails and a later run fills in the missing memories, that night's personality and diary are not regenerated to include them.
+  - Rewinding a conversation in Claude Code can leave that session's self-review stuck, so new turns from it stop being digested.
 - **The codebase is commented in Chinese.** It grew up bilingual — code and identifiers are English, commentary is Chinese. Translation PRs welcome.
 
 ## How is this different from…
