@@ -11,7 +11,7 @@
 English · [中文](README.zh-CN.md)
 
 > [!WARNING]
-> **No longer maintained (October 2026).** The code stays here as-is; issues and pull requests won't be answered. The experimental Codex adapter has known bugs (it can merge records from different sessions and record failed commands as successful) — don't use it.
+> The experimental Codex adapter has known bugs (it can merge records from different sessions and record failed commands as successful) — don't use it. The main Claude Code setup is not affected.
 
 **Memory, moods, and a growable personality for Claude Code. Your AI keeps a diary — and you can read it.**
 
